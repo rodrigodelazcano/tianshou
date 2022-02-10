@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from tianshou.data import Batch
+from tianshou.data import Batch, to_torch
 from tianshou.utils.net.common import MLP
 
 
@@ -49,21 +49,26 @@ class Actor(nn.Module):
         self.preprocess = preprocess_net
         self.output_dim = int(np.prod(action_shape))
         input_dim = getattr(preprocess_net, "output_dim", preprocess_net_output_dim)
-        self.last = MLP(input_dim, self.output_dim, hidden_sizes, device=self.device)
+        self.last = MLP(
+            input_dim,  # type: ignore
+            self.output_dim,
+            hidden_sizes,
+            device=self.device
+        )
         self.softmax_output = softmax_output
 
     def forward(
         self,
-        s: Union[np.ndarray, torch.Tensor],
+        obs: Union[np.ndarray, torch.Tensor],
         state: Any = None,
         info: Dict[str, Any] = {},
     ) -> Tuple[torch.Tensor, Any]:
         r"""Mapping: s -> Q(s, \*)."""
-        logits, h = self.preprocess(s, state)
+        logits, hidden = self.preprocess(obs, state)
         logits = self.last(logits)
         if self.softmax_output:
             logits = F.softmax(logits, dim=-1)
-        return logits, h
+        return logits, hidden
 
 
 class Critic(nn.Module):
@@ -101,13 +106,18 @@ class Critic(nn.Module):
         self.preprocess = preprocess_net
         self.output_dim = last_size
         input_dim = getattr(preprocess_net, "output_dim", preprocess_net_output_dim)
-        self.last = MLP(input_dim, last_size, hidden_sizes, device=self.device)
+        self.last = MLP(
+            input_dim,  # type: ignore
+            last_size,
+            hidden_sizes,
+            device=self.device
+        )
 
     def forward(
-        self, s: Union[np.ndarray, torch.Tensor], **kwargs: Any
+        self, obs: Union[np.ndarray, torch.Tensor], **kwargs: Any
     ) -> torch.Tensor:
         """Mapping: s -> V(s)."""
-        logits, _ = self.preprocess(s, state=kwargs.get("state", None))
+        logits, _ = self.preprocess(obs, state=kwargs.get("state", None))
         return self.last(logits)
 
 
@@ -183,14 +193,16 @@ class ImplicitQuantileNetwork(Critic):
         self.input_dim = getattr(
             preprocess_net, "output_dim", preprocess_net_output_dim
         )
-        self.embed_model = CosineEmbeddingNetwork(num_cosines,
-                                                  self.input_dim).to(device)
+        self.embed_model = CosineEmbeddingNetwork(
+            num_cosines,
+            self.input_dim  # type: ignore
+        ).to(device)
 
     def forward(  # type: ignore
-        self, s: Union[np.ndarray, torch.Tensor], sample_size: int, **kwargs: Any
+        self, obs: Union[np.ndarray, torch.Tensor], sample_size: int, **kwargs: Any
     ) -> Tuple[Any, torch.Tensor]:
         r"""Mapping: s -> Q(s, \*)."""
-        logits, h = self.preprocess(s, state=kwargs.get("state", None))
+        logits, hidden = self.preprocess(obs, state=kwargs.get("state", None))
         # Sample fractions.
         batch_size = logits.size(0)
         taus = torch.rand(
@@ -199,7 +211,7 @@ class ImplicitQuantileNetwork(Critic):
         embedding = (logits.unsqueeze(1) *
                      self.embed_model(taus)).view(batch_size * sample_size, -1)
         out = self.last(embedding).view(batch_size, sample_size, -1).transpose(1, 2)
-        return (out, taus), h
+        return (out, taus), hidden
 
 
 class FractionProposalNetwork(nn.Module):
@@ -223,17 +235,17 @@ class FractionProposalNetwork(nn.Module):
         self.embedding_dim = embedding_dim
 
     def forward(
-        self, state_embeddings: torch.Tensor
+        self, obs_embeddings: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # Calculate (log of) probabilities q_i in the paper.
-        m = torch.distributions.Categorical(logits=self.net(state_embeddings))
-        taus_1_N = torch.cumsum(m.probs, dim=1)
+        dist = torch.distributions.Categorical(logits=self.net(obs_embeddings))
+        taus_1_N = torch.cumsum(dist.probs, dim=1)
         # Calculate \tau_i (i=0,...,N).
         taus = F.pad(taus_1_N, (1, 0))
         # Calculate \hat \tau_i (i=0,...,N-1).
         tau_hats = (taus[:, :-1] + taus[:, 1:]).detach() / 2.0
         # Calculate entropies of value distributions.
-        entropies = m.entropy()
+        entropies = dist.entropy()
         return taus, tau_hats, entropies
 
 
@@ -282,13 +294,13 @@ class FullQuantileFunction(ImplicitQuantileNetwork):
         return quantiles
 
     def forward(  # type: ignore
-        self, s: Union[np.ndarray, torch.Tensor],
+        self, obs: Union[np.ndarray, torch.Tensor],
         propose_model: FractionProposalNetwork,
         fractions: Optional[Batch] = None,
         **kwargs: Any
     ) -> Tuple[Any, torch.Tensor]:
         r"""Mapping: s -> Q(s, \*)."""
-        logits, h = self.preprocess(s, state=kwargs.get("state", None))
+        logits, hidden = self.preprocess(obs, state=kwargs.get("state", None))
         # Propose fractions
         if fractions is None:
             taus, tau_hats, entropies = propose_model(logits.detach())
@@ -301,7 +313,7 @@ class FullQuantileFunction(ImplicitQuantileNetwork):
         if self.training:
             with torch.no_grad():
                 quantiles_tau = self._compute_quantiles(logits, taus[:, 1:-1])
-        return (quantiles, fractions, quantiles_tau), h
+        return (quantiles, fractions, quantiles_tau), hidden
 
 
 class NoisyLinear(nn.Module):
@@ -380,3 +392,58 @@ def sample_noise(model: nn.Module) -> bool:
             m.sample()
             done = True
     return done
+
+
+class IntrinsicCuriosityModule(nn.Module):
+    """Implementation of Intrinsic Curiosity Module. arXiv:1705.05363.
+
+    :param torch.nn.Module feature_net: a self-defined feature_net which output a
+        flattened hidden state.
+    :param int feature_dim: input dimension of the feature net.
+    :param int action_dim: dimension of the action space.
+    :param hidden_sizes: hidden layer sizes for forward and inverse models.
+    :param device: device for the module.
+    """
+
+    def __init__(
+        self,
+        feature_net: nn.Module,
+        feature_dim: int,
+        action_dim: int,
+        hidden_sizes: Sequence[int] = (),
+        device: Union[str, torch.device] = "cpu"
+    ) -> None:
+        super().__init__()
+        self.feature_net = feature_net
+        self.forward_model = MLP(
+            feature_dim + action_dim,
+            output_dim=feature_dim,
+            hidden_sizes=hidden_sizes,
+            device=device
+        )
+        self.inverse_model = MLP(
+            feature_dim * 2,
+            output_dim=action_dim,
+            hidden_sizes=hidden_sizes,
+            device=device
+        )
+        self.feature_dim = feature_dim
+        self.action_dim = action_dim
+        self.device = device
+
+    def forward(
+        self, s1: Union[np.ndarray, torch.Tensor],
+        act: Union[np.ndarray, torch.Tensor], s2: Union[np.ndarray,
+                                                        torch.Tensor], **kwargs: Any
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        r"""Mapping: s1, act, s2 -> mse_loss, act_hat."""
+        s1 = to_torch(s1, dtype=torch.float32, device=self.device)
+        s2 = to_torch(s2, dtype=torch.float32, device=self.device)
+        phi1, phi2 = self.feature_net(s1), self.feature_net(s2)
+        act = to_torch(act, dtype=torch.long, device=self.device)
+        phi2_hat = self.forward_model(
+            torch.cat([phi1, F.one_hot(act, num_classes=self.action_dim)], dim=1)
+        )
+        mse_loss = 0.5 * F.mse_loss(phi2_hat, phi2, reduction="none").sum(1)
+        act_hat = self.inverse_model(torch.cat([phi1, phi2], dim=1))
+        return mse_loss, act_hat

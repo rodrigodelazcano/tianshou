@@ -197,6 +197,35 @@ The above code supports only stacked-observation. If you want to use stacked-act
 - After applying wrapper: ``([s, a], a, [s', a'], r, d)`` stored in replay buffer, and get both stacked s and a.
 
 
+.. _multi_gpu:
+
+Multi-GPU Training
+------------------
+
+To enable training an RL agent with multiple GPUs for a standard environment (i.e., without nested observation) with default networks provided by Tianshou:
+
+1. Import :class:`~tianshou.utils.net.common.DataParallelNet` from ``tianshou.utils.net.common``;
+2. Change the ``device`` argument to ``None`` in the existing networks such as ``Net``, ``Actor``, ``Critic``, ``ActorProb``
+3. Apply ``DataParallelNet`` wrapper to these networks.
+
+::
+
+    from tianshou.utils.net.common import Net, DataParallelNet
+    from tianshou.utils.net.discrete import Actor, Critic
+
+    actor = DataParallelNet(Actor(net, args.action_shape, device=None).to(args.device))
+    critic = DataParallelNet(Critic(net, device=None).to(args.device))
+
+Yes, that's all! This general approach can be applied to almost all kinds of algorithms implemented in Tianshou.
+We provide a complete script to show how to run multi-GPU: `test/discrete/test_ppo.py <https://github.com/thu-ml/tianshou/blob/master/test/discrete/test_ppo.py>`_
+
+As for other cases such as customized network or environments that have a nested observation, here are the rules:
+
+1. The data format transformation (numpy -> cuda) is done in the ``DataParallelNet`` wrapper; your customized network should not apply any kinds of data format transformation;
+2. Create a similar class that inherit ``DataParallelNet``, which is only in charge of data format transformation (numpy -> cuda);
+3. Do the same things above.
+
+
 .. _self_defined_env:
 
 User-defined Environment and Different State Representation
@@ -321,7 +350,7 @@ But the state stored in the buffer may be a shallow-copy. To make sure each of y
 
     def reset():
         return copy.deepcopy(self.graph)
-    def step(a):
+    def step(action):
         ...
         return copy.deepcopy(self.graph), reward, done, {}
 
@@ -362,13 +391,13 @@ In addition, legal actions in multi-agent RL often vary with timestep (just like
 The above description gives rise to the following formulation of multi-agent RL:
 ::
 
-    action = policy(state, agent_id, mask)
-    (next_state, next_agent_id, next_mask), reward = env.step(action)
+    act = policy(state, agent_id, mask)
+    (next_state, next_agent_id, next_mask), reward = env.step(act)
 
 By constructing a new state ``state_ = (state, agent_id, mask)``, essentially we can return to the typical formulation of RL:
 ::
 
-    action = policy(state_)
-    next_state_, reward = env.step(action)
+    act = policy(state_)
+    next_state_, reward = env.step(act)
 
 Following this idea, we write a tiny example of playing `Tic Tac Toe <https://en.wikipedia.org/wiki/Tic-tac-toe>`_ against a random player by using a Q-learning algorithm. The tutorial is at :doc:`/tutorials/tictactoe`.

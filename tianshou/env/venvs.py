@@ -2,6 +2,7 @@ from typing import Any, Callable, List, Optional, Tuple, Union
 
 import gym
 import numpy as np
+import pettingzoo
 
 from tianshou.env.worker import (
     DummyEnvWorker,
@@ -130,17 +131,56 @@ class BaseVectorEnv(gym.Env):
         if key in [
             'metadata', 'reward_range', 'spec', 'action_space', 'observation_space'
         ]:  # reserved keys in gym.Env
-            return self.__getattr__(key)
+            return self.get_env_attr(key)
         else:
             return super().__getattribute__(key)
 
-    def __getattr__(self, key: str) -> List[Any]:
-        """Fetch a list of env attributes.
+    def get_env_attr(
+        self,
+        key: str,
+        id: Optional[Union[int, List[int], np.ndarray]] = None
+    ) -> List[Any]:
+        """Get an attribute from the underlying environments.
 
-        This function tries to retrieve an attribute from each individual wrapped
-        environment, if it does not belong to the wrapping vector environment class.
+        If id is an int, retrieve the attribute denoted by key from the environment
+        underlying the worker at index id. The result is returned as a list with one
+        element. Otherwise, retrieve the attribute for all workers at indices id and
+        return a list that is ordered correspondingly to id.
+
+        :param str key: The key of the desired attribute.
+        :param id: Indice(s) of the desired worker(s). Default to None for all env_id.
+
+        :return list: The list of environment attributes.
         """
-        return [getattr(worker, key) for worker in self.workers]
+        self._assert_is_not_closed()
+        id = self._wrap_id(id)
+        if self.is_async:
+            self._assert_id(id)
+
+        return [self.workers[j].get_env_attr(key) for j in id]
+
+    def set_env_attr(
+        self,
+        key: str,
+        value: Any,
+        id: Optional[Union[int, List[int], np.ndarray]] = None
+    ) -> None:
+        """Set an attribute in the underlying environments.
+
+        If id is an int, set the attribute denoted by key from the environment
+        underlying the worker at index id to value.
+        Otherwise, set the attribute for all workers at indices id.
+
+        :param str key: The key of the desired attribute.
+        :param Any value: The new value of the attribute.
+        :param id: Indice(s) of the desired worker(s). Default to None for all env_id.
+        """
+        self._assert_is_not_closed()
+        id = self._wrap_id(id)
+        if self.is_async:
+            self._assert_id(id)
+        for j in id:
+            self.workers[j].set_env_attr(key, value)
 
     def _wrap_id(
         self,
@@ -170,7 +210,10 @@ class BaseVectorEnv(gym.Env):
         id = self._wrap_id(id)
         if self.is_async:
             self._assert_id(id)
-        obs_list = [self.workers[i].reset() for i in id]
+        # send(None) == reset() in worker
+        for i in id:
+            self.workers[i].send(None)
+        obs_list = [self.workers[i].recv() for i in id]
         try:
             obs = np.stack(obs_list)
         except ValueError:  # different len(obs)
@@ -219,10 +262,10 @@ class BaseVectorEnv(gym.Env):
         if not self.is_async:
             assert len(action) == len(id)
             for i, j in enumerate(id):
-                self.workers[j].send_action(action[i])
+                self.workers[j].send(action[i])
             result = []
             for j in id:
-                obs, rew, done, info = self.workers[j].get_result()
+                obs, rew, done, info = self.workers[j].recv()
                 info["env_id"] = j
                 result.append((obs, rew, done, info))
         else:
@@ -230,7 +273,7 @@ class BaseVectorEnv(gym.Env):
                 self._assert_id(id)
                 assert len(action) == len(id)
                 for act, env_id in zip(action, id):
-                    self.workers[env_id].send_action(act)
+                    self.workers[env_id].send(act)
                     self.waiting_conn.append(self.workers[env_id])
                     self.waiting_id.append(env_id)
                 self.ready_id = [x for x in self.ready_id if x not in id]
@@ -244,7 +287,7 @@ class BaseVectorEnv(gym.Env):
                 waiting_index = self.waiting_conn.index(conn)
                 self.waiting_conn.pop(waiting_index)
                 env_id = self.waiting_id.pop(waiting_index)
-                obs, rew, done, info = conn.get_result()
+                obs, rew, done, info = conn.recv()
                 info["env_id"] = env_id
                 result.append((obs, rew, done, info))
                 self.ready_id.append(env_id)
@@ -322,7 +365,10 @@ class DummyVectorEnv(BaseVectorEnv):
         Please refer to :class:`~tianshou.env.BaseVectorEnv` for other APIs' usage.
     """
 
-    def __init__(self, env_fns: List[Callable[[], gym.Env]], **kwargs: Any) -> None:
+    def __init__(
+        self, env_fns: List[Callable[[], Union[gym.Env, pettingzoo.AECEnv]]],
+        **kwargs: Any
+    ) -> None:
         super().__init__(env_fns, DummyEnvWorker, **kwargs)
 
 
@@ -373,10 +419,10 @@ class RayVectorEnv(BaseVectorEnv):
     def __init__(self, env_fns: List[Callable[[], gym.Env]], **kwargs: Any) -> None:
         try:
             import ray
-        except ImportError as e:
+        except ImportError as exception:
             raise ImportError(
                 "Please install ray to support RayVectorEnv: pip install ray"
-            ) from e
+            ) from exception
         if not ray.is_initialized():
             ray.init()
         super().__init__(env_fns, RayEnvWorker, **kwargs)

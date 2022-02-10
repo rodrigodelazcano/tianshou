@@ -58,22 +58,22 @@ def test_async_env(size=10000, num=8, sleep=0.1):
         # should be smaller
         action_list = [1] * num + [0] * (num * 2) + [1] * (num * 4)
         current_idx_start = 0
-        action = action_list[:num]
+        act = action_list[:num]
         env_ids = list(range(num))
         o = []
         spent_time = time.time()
         while current_idx_start < len(action_list):
-            A, B, C, D = v.step(action=action, id=env_ids)
+            A, B, C, D = v.step(action=act, id=env_ids)
             b = Batch({'obs': A, 'rew': B, 'done': C, 'info': D})
             env_ids = b.info.env_id
             o.append(b)
-            current_idx_start += len(action)
+            current_idx_start += len(act)
             # len of action may be smaller than len(A) in the end
-            action = action_list[current_idx_start:current_idx_start + len(A)]
+            act = action_list[current_idx_start:current_idx_start + len(A)]
             # truncate env_ids with the first terms
             # typically len(env_ids) == len(A) == len(action), except for the
             # last batch when actions are not enough
-            env_ids = env_ids[:len(action)]
+            env_ids = env_ids[:len(act)]
         spent_time = time.time() - spent_time
         Batch.cat(o)
         v.close()
@@ -96,7 +96,12 @@ def test_async_check_id(size=100, num=4, sleep=.2, timeout=.7):
     for cls in test_cls:
         pass_check = 1
         v = cls(env_fns, wait_num=num - 1, timeout=timeout)
+        t = time.time()
         v.reset()
+        t = time.time() - t
+        print(f"{cls} reset {t}")
+        if t > sleep * 9:  # huge than maximum sleep time (7 sleep)
+            pass_check = 0
         expect_result = [
             [0, 1],
             [0, 1, 2],
@@ -134,7 +139,7 @@ def test_vecenv(size=10, num=8, sleep=0.001):
         SubprocVectorEnv(env_fns),
         ShmemVectorEnv(env_fns),
     ]
-    if has_ray():
+    if has_ray() and sys.platform == "linux":
         venv += [RayVectorEnv(env_fns)]
     for v in venv:
         v.seed(0)
@@ -166,10 +171,25 @@ def test_vecenv(size=10, num=8, sleep=0.001):
         for i, v in enumerate(venv):
             print(f'{type(v)}: {t[i]:.6f}s')
 
+    def assert_get(v, expected):
+        assert v.get_env_attr("size") == expected
+        assert v.get_env_attr("size", id=0) == [expected[0]]
+        assert v.get_env_attr("size", id=[0, 1, 2]) == expected[:3]
+
     for v in venv:
-        assert v.size == list(range(size, size + num))
+        assert_get(v, list(range(size, size + num)))
         assert v.env_num == num
         assert v.action_space == [Discrete(2)] * num
+
+        v.set_env_attr("size", 0)
+        assert_get(v, [0] * num)
+
+        v.set_env_attr("size", 1, 0)
+        assert_get(v, [1] + [0] * (num - 1))
+
+        v.set_env_attr("size", 2, [1, 2, 3])
+        assert_get(v, [1] + [2] * 3 + [0] * (num - 4))
+
     for v in venv:
         v.close()
 

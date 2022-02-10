@@ -12,14 +12,14 @@ from tianshou.env import DummyVectorEnv
 from tianshou.policy import PPOPolicy
 from tianshou.trainer import onpolicy_trainer
 from tianshou.utils import TensorboardLogger
-from tianshou.utils.net.common import Net
+from tianshou.utils.net.common import ActorCritic, DataParallelNet, Net
 from tianshou.utils.net.discrete import Actor, Critic
 
 
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--task', type=str, default='CartPole-v0')
-    parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--seed', type=int, default=1626)
     parser.add_argument('--buffer-size', type=int, default=20000)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--gamma', type=float, default=0.99)
@@ -71,16 +71,21 @@ def test_ppo(args=get_args()):
     test_envs.seed(args.seed)
     # model
     net = Net(args.state_shape, hidden_sizes=args.hidden_sizes, device=args.device)
-    actor = Actor(net, args.action_shape, device=args.device).to(args.device)
-    critic = Critic(net, device=args.device).to(args.device)
+    if torch.cuda.is_available():
+        actor = DataParallelNet(
+            Actor(net, args.action_shape, device=None).to(args.device)
+        )
+        critic = DataParallelNet(Critic(net, device=None).to(args.device))
+    else:
+        actor = Actor(net, args.action_shape, device=args.device).to(args.device)
+        critic = Critic(net, device=args.device).to(args.device)
+    actor_critic = ActorCritic(actor, critic)
     # orthogonal initialization
-    for m in set(actor.modules()).union(critic.modules()):
+    for m in actor_critic.modules():
         if isinstance(m, torch.nn.Linear):
             torch.nn.init.orthogonal_(m.weight)
             torch.nn.init.zeros_(m.bias)
-    optim = torch.optim.Adam(
-        set(actor.parameters()).union(critic.parameters()), lr=args.lr
-    )
+    optim = torch.optim.Adam(actor_critic.parameters(), lr=args.lr)
     dist = torch.distributions.Categorical
     policy = PPOPolicy(
         actor,

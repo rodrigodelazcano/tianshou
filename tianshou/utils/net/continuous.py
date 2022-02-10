@@ -48,19 +48,24 @@ class Actor(nn.Module):
         self.preprocess = preprocess_net
         self.output_dim = int(np.prod(action_shape))
         input_dim = getattr(preprocess_net, "output_dim", preprocess_net_output_dim)
-        self.last = MLP(input_dim, self.output_dim, hidden_sizes, device=self.device)
+        self.last = MLP(
+            input_dim,  # type: ignore
+            self.output_dim,
+            hidden_sizes,
+            device=self.device
+        )
         self._max = max_action
 
     def forward(
         self,
-        s: Union[np.ndarray, torch.Tensor],
+        obs: Union[np.ndarray, torch.Tensor],
         state: Any = None,
         info: Dict[str, Any] = {},
     ) -> Tuple[torch.Tensor, Any]:
-        """Mapping: s -> logits -> action."""
-        logits, h = self.preprocess(s, state)
+        """Mapping: obs -> logits -> action."""
+        logits, hidden = self.preprocess(obs, state)
         logits = self._max * torch.tanh(self.last(logits))
-        return logits, h
+        return logits, hidden
 
 
 class Critic(nn.Module):
@@ -96,28 +101,33 @@ class Critic(nn.Module):
         self.preprocess = preprocess_net
         self.output_dim = 1
         input_dim = getattr(preprocess_net, "output_dim", preprocess_net_output_dim)
-        self.last = MLP(input_dim, 1, hidden_sizes, device=self.device)
+        self.last = MLP(
+            input_dim,  # type: ignore
+            1,
+            hidden_sizes,
+            device=self.device
+        )
 
     def forward(
         self,
-        s: Union[np.ndarray, torch.Tensor],
-        a: Optional[Union[np.ndarray, torch.Tensor]] = None,
+        obs: Union[np.ndarray, torch.Tensor],
+        act: Optional[Union[np.ndarray, torch.Tensor]] = None,
         info: Dict[str, Any] = {},
     ) -> torch.Tensor:
         """Mapping: (s, a) -> logits -> Q(s, a)."""
-        s = torch.as_tensor(
-            s,
+        obs = torch.as_tensor(
+            obs,
             device=self.device,  # type: ignore
             dtype=torch.float32,
         ).flatten(1)
-        if a is not None:
-            a = torch.as_tensor(
-                a,
+        if act is not None:
+            act = torch.as_tensor(
+                act,
                 device=self.device,  # type: ignore
                 dtype=torch.float32,
             ).flatten(1)
-            s = torch.cat([s, a], dim=1)
-        logits, h = self.preprocess(s)
+            obs = torch.cat([obs, act], dim=1)
+        logits, hidden = self.preprocess(obs)
         logits = self.last(logits)
         return logits
 
@@ -165,11 +175,19 @@ class ActorProb(nn.Module):
         self.device = device
         self.output_dim = int(np.prod(action_shape))
         input_dim = getattr(preprocess_net, "output_dim", preprocess_net_output_dim)
-        self.mu = MLP(input_dim, self.output_dim, hidden_sizes, device=self.device)
+        self.mu = MLP(
+            input_dim,  # type: ignore
+            self.output_dim,
+            hidden_sizes,
+            device=self.device
+        )
         self._c_sigma = conditioned_sigma
         if conditioned_sigma:
             self.sigma = MLP(
-                input_dim, self.output_dim, hidden_sizes, device=self.device
+                input_dim,  # type: ignore
+                self.output_dim,
+                hidden_sizes,
+                device=self.device
             )
         else:
             self.sigma_param = nn.Parameter(torch.zeros(self.output_dim, 1))
@@ -178,12 +196,12 @@ class ActorProb(nn.Module):
 
     def forward(
         self,
-        s: Union[np.ndarray, torch.Tensor],
+        obs: Union[np.ndarray, torch.Tensor],
         state: Any = None,
         info: Dict[str, Any] = {},
     ) -> Tuple[Tuple[torch.Tensor, torch.Tensor], Any]:
-        """Mapping: s -> logits -> (mu, sigma)."""
-        logits, h = self.preprocess(s, state)
+        """Mapping: obs -> logits -> (mu, sigma)."""
+        logits, hidden = self.preprocess(obs, state)
         mu = self.mu(logits)
         if not self._unbounded:
             mu = self._max * torch.tanh(mu)
@@ -234,30 +252,34 @@ class RecurrentActorProb(nn.Module):
 
     def forward(
         self,
-        s: Union[np.ndarray, torch.Tensor],
+        obs: Union[np.ndarray, torch.Tensor],
         state: Optional[Dict[str, torch.Tensor]] = None,
         info: Dict[str, Any] = {},
     ) -> Tuple[Tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]:
         """Almost the same as :class:`~tianshou.utils.net.common.Recurrent`."""
-        s = torch.as_tensor(s, device=self.device, dtype=torch.float32)  # type: ignore
-        # s [bsz, len, dim] (training) or [bsz, dim] (evaluation)
+        obs = torch.as_tensor(
+            obs,
+            device=self.device,  # type: ignore
+            dtype=torch.float32,
+        )
+        # obs [bsz, len, dim] (training) or [bsz, dim] (evaluation)
         # In short, the tensor's shape in training phase is longer than which
         # in evaluation phase.
-        if len(s.shape) == 2:
-            s = s.unsqueeze(-2)
+        if len(obs.shape) == 2:
+            obs = obs.unsqueeze(-2)
         self.nn.flatten_parameters()
         if state is None:
-            s, (h, c) = self.nn(s)
+            obs, (hidden, cell) = self.nn(obs)
         else:
             # we store the stack data in [bsz, len, ...] format
             # but pytorch rnn needs [len, bsz, ...]
-            s, (h, c) = self.nn(
-                s, (
-                    state["h"].transpose(0, 1).contiguous(),
-                    state["c"].transpose(0, 1).contiguous()
+            obs, (hidden, cell) = self.nn(
+                obs, (
+                    state["hidden"].transpose(0, 1).contiguous(),
+                    state["cell"].transpose(0, 1).contiguous()
                 )
             )
-        logits = s[:, -1]
+        logits = obs[:, -1]
         mu = self.mu(logits)
         if not self._unbounded:
             mu = self._max * torch.tanh(mu)
@@ -269,8 +291,8 @@ class RecurrentActorProb(nn.Module):
             sigma = (self.sigma_param.view(shape) + torch.zeros_like(mu)).exp()
         # please ensure the first dim is batch size: [bsz, len, ...]
         return (mu, sigma), {
-            "h": h.transpose(0, 1).detach(),
-            "c": c.transpose(0, 1).detach()
+            "hidden": hidden.transpose(0, 1).detach(),
+            "cell": cell.transpose(0, 1).detach()
         }
 
 
@@ -303,25 +325,149 @@ class RecurrentCritic(nn.Module):
 
     def forward(
         self,
-        s: Union[np.ndarray, torch.Tensor],
-        a: Optional[Union[np.ndarray, torch.Tensor]] = None,
+        obs: Union[np.ndarray, torch.Tensor],
+        act: Optional[Union[np.ndarray, torch.Tensor]] = None,
         info: Dict[str, Any] = {},
     ) -> torch.Tensor:
         """Almost the same as :class:`~tianshou.utils.net.common.Recurrent`."""
-        s = torch.as_tensor(s, device=self.device, dtype=torch.float32)  # type: ignore
-        # s [bsz, len, dim] (training) or [bsz, dim] (evaluation)
+        obs = torch.as_tensor(
+            obs,
+            device=self.device,  # type: ignore
+            dtype=torch.float32,
+        )
+        # obs [bsz, len, dim] (training) or [bsz, dim] (evaluation)
         # In short, the tensor's shape in training phase is longer than which
         # in evaluation phase.
-        assert len(s.shape) == 3
+        assert len(obs.shape) == 3
         self.nn.flatten_parameters()
-        s, (h, c) = self.nn(s)
-        s = s[:, -1]
-        if a is not None:
-            a = torch.as_tensor(
-                a,
+        obs, (hidden, cell) = self.nn(obs)
+        obs = obs[:, -1]
+        if act is not None:
+            act = torch.as_tensor(
+                act,
                 device=self.device,  # type: ignore
                 dtype=torch.float32,
             )
-            s = torch.cat([s, a], dim=1)
-        s = self.fc2(s)
-        return s
+            obs = torch.cat([obs, act], dim=1)
+        obs = self.fc2(obs)
+        return obs
+
+
+class Perturbation(nn.Module):
+    """Implementation of perturbation network in BCQ algorithm. Given a state and \
+    action, it can generate perturbed action.
+
+    :param torch.nn.Module preprocess_net: a self-defined preprocess_net which output a
+        flattened hidden state.
+    :param float max_action: the maximum value of each dimension of action.
+    :param Union[str, int, torch.device] device: which device to create this model on.
+        Default to cpu.
+    :param float phi: max perturbation parameter for BCQ. Default to 0.05.
+
+    For advanced usage (how to customize the network), please refer to
+    :ref:`build_the_network`.
+
+    .. seealso::
+
+        You can refer to `examples/offline/offline_bcq.py` to see how to use it.
+    """
+
+    def __init__(
+        self,
+        preprocess_net: nn.Module,
+        max_action: float,
+        device: Union[str, int, torch.device] = "cpu",
+        phi: float = 0.05
+    ):
+        # preprocess_net: input_dim=state_dim+action_dim, output_dim=action_dim
+        super(Perturbation, self).__init__()
+        self.preprocess_net = preprocess_net
+        self.device = device
+        self.max_action = max_action
+        self.phi = phi
+
+    def forward(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+        # preprocess_net
+        logits = self.preprocess_net(torch.cat([state, action], -1))[0]
+        noise = self.phi * self.max_action * torch.tanh(logits)
+        # clip to [-max_action, max_action]
+        return (noise + action).clamp(-self.max_action, self.max_action)
+
+
+class VAE(nn.Module):
+    """Implementation of VAE. It models the distribution of action. Given a \
+    state, it can generate actions similar to those in batch. It is used \
+    in BCQ algorithm.
+
+    :param torch.nn.Module encoder: the encoder in VAE. Its input_dim must be
+        state_dim + action_dim, and output_dim must be hidden_dim.
+    :param torch.nn.Module decoder: the decoder in VAE. Its input_dim must be
+        state_dim + latent_dim, and output_dim must be action_dim.
+    :param int hidden_dim: the size of the last linear-layer in encoder.
+    :param int latent_dim: the size of latent layer.
+    :param float max_action: the maximum value of each dimension of action.
+    :param Union[str, torch.device] device: which device to create this model on.
+        Default to "cpu".
+
+    For advanced usage (how to customize the network), please refer to
+    :ref:`build_the_network`.
+
+    .. seealso::
+
+        You can refer to `examples/offline/offline_bcq.py` to see how to use it.
+    """
+
+    def __init__(
+        self,
+        encoder: nn.Module,
+        decoder: nn.Module,
+        hidden_dim: int,
+        latent_dim: int,
+        max_action: float,
+        device: Union[str, torch.device] = "cpu"
+    ):
+        super(VAE, self).__init__()
+        self.encoder = encoder
+
+        self.mean = nn.Linear(hidden_dim, latent_dim)
+        self.log_std = nn.Linear(hidden_dim, latent_dim)
+
+        self.decoder = decoder
+
+        self.max_action = max_action
+        self.latent_dim = latent_dim
+        self.device = device
+
+    def forward(
+        self, state: torch.Tensor, action: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # [state, action] -> z , [state, z] -> action
+        latent_z = self.encoder(torch.cat([state, action], -1))
+        # shape of z: (state.shape[:-1], hidden_dim)
+
+        mean = self.mean(latent_z)
+        # Clamped for numerical stability
+        log_std = self.log_std(latent_z).clamp(-4, 15)
+        std = torch.exp(log_std)
+        # shape of mean, std: (state.shape[:-1], latent_dim)
+
+        latent_z = mean + std * torch.randn_like(std)  # (state.shape[:-1], latent_dim)
+
+        reconstruction = self.decode(state, latent_z)  # (state.shape[:-1], action_dim)
+        return reconstruction, mean, std
+
+    def decode(
+        self,
+        state: torch.Tensor,
+        latent_z: Union[torch.Tensor, None] = None
+    ) -> torch.Tensor:
+        # decode(state) -> action
+        if latent_z is None:
+            # state.shape[0] may be batch_size
+            # latent vector clipped to [-0.5, 0.5]
+            latent_z = torch.randn(state.shape[:-1] + (self.latent_dim, )) \
+                .to(self.device).clamp(-0.5, 0.5)
+
+        # decode z with state!
+        return self.max_action * \
+            torch.tanh(self.decoder(torch.cat([state, latent_z], -1)))

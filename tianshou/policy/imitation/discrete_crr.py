@@ -83,23 +83,23 @@ class DiscreteCRRPolicy(PGPolicy):
         if self._target and self._iter % self._freq == 0:
             self.sync_weight()
         self.optim.zero_grad()
-        q_t, _ = self.critic(batch.obs)
+        q_t = self.critic(batch.obs)
         act = to_torch(batch.act, dtype=torch.long, device=q_t.device)
         qa_t = q_t.gather(1, act.unsqueeze(1))
         # Critic loss
         with torch.no_grad():
             target_a_t, _ = self.actor_old(batch.obs_next)
             target_m = Categorical(logits=target_a_t)
-            q_t_target, _ = self.critic_old(batch.obs_next)
+            q_t_target = self.critic_old(batch.obs_next)
             rew = to_torch_as(batch.rew, q_t_target)
             expected_target_q = (q_t_target * target_m.probs).sum(-1, keepdim=True)
             expected_target_q[batch.done > 0] = 0.0
             target = rew.unsqueeze(1) + self._gamma * expected_target_q
         critic_loss = 0.5 * F.mse_loss(qa_t, target)
         # Actor loss
-        a_t, _ = self.actor(batch.obs)
-        m = Categorical(logits=a_t)
-        expected_policy_q = (q_t * m.probs).sum(-1, keepdim=True)
+        act_target, _ = self.actor(batch.obs)
+        dist = Categorical(logits=act_target)
+        expected_policy_q = (q_t * dist.probs).sum(-1, keepdim=True)
         advantage = qa_t - expected_policy_q
         if self._policy_improvement_mode == "binary":
             actor_loss_coef = (advantage > 0).float()
@@ -109,7 +109,7 @@ class DiscreteCRRPolicy(PGPolicy):
             )
         else:
             actor_loss_coef = 1.0  # effectively behavior cloning
-        actor_loss = (-m.log_prob(act) * actor_loss_coef).mean()
+        actor_loss = (-dist.log_prob(act) * actor_loss_coef).mean()
         # CQL loss/regularizer
         min_q_loss = (q_t.logsumexp(1) - qa_t).mean()
         loss = actor_loss + critic_loss + self._min_q_weight * min_q_loss

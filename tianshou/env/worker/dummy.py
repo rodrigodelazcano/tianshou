@@ -13,8 +13,11 @@ class DummyEnvWorker(EnvWorker):
         self.env = env_fn()
         super().__init__(env_fn)
 
-    def __getattr__(self, key: str) -> Any:
+    def get_env_attr(self, key: str) -> Any:
         return getattr(self.env, key)
+
+    def set_env_attr(self, key: str, value: Any) -> None:
+        setattr(self.env, key, value)
 
     def reset(self) -> Any:
         return self.env.reset()
@@ -26,8 +29,11 @@ class DummyEnvWorker(EnvWorker):
         # Sequential EnvWorker objects are always ready
         return workers
 
-    def send_action(self, action: np.ndarray) -> None:
-        self.result = self.env.step(action)
+    def send(self, action: Optional[np.ndarray]) -> None:
+        if action is None:
+            self.result = self.env.reset()
+        else:
+            self.result = self.env.step(action)
 
     def seed(self, seed: Optional[int] = None) -> List[int]:
         super().seed(seed)

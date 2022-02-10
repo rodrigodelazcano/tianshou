@@ -19,10 +19,13 @@ from tianshou.policy.modelfree.td3 import TD3Policy
 from tianshou.policy.modelfree.sac import SACPolicy
 from tianshou.policy.modelfree.discrete_sac import DiscreteSACPolicy
 from tianshou.policy.imitation.base import ImitationPolicy
+from tianshou.policy.imitation.bcq import BCQPolicy
+from tianshou.policy.imitation.cql import CQLPolicy
 from tianshou.policy.imitation.discrete_bcq import DiscreteBCQPolicy
 from tianshou.policy.imitation.discrete_cql import DiscreteCQLPolicy
 from tianshou.policy.imitation.discrete_crr import DiscreteCRRPolicy
 from tianshou.policy.modelbased.psrl import PSRLPolicy
+from tianshou.policy.modelbased.icm import ICMPolicy
 from tianshou.policy.multiagent.mapolicy import MultiAgentPolicyManager
 
 __all__ = [
@@ -44,9 +47,12 @@ __all__ = [
     "SACPolicy",
     "DiscreteSACPolicy",
     "ImitationPolicy",
+    "BCQPolicy",
+    "CQLPolicy",
     "DiscreteBCQPolicy",
     "DiscreteCQLPolicy",
     "DiscreteCRRPolicy",
     "PSRLPolicy",
+    "ICMPolicy",
     "MultiAgentPolicyManager",
 ]

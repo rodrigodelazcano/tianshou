@@ -7,6 +7,7 @@ from torch import nn
 
 from tianshou.data import Batch, ReplayBuffer, to_torch_as
 from tianshou.policy import PGPolicy
+from tianshou.utils.net.common import ActorCritic
 
 
 class A2CPolicy(PGPolicy):
@@ -70,6 +71,7 @@ class A2CPolicy(PGPolicy):
         self._weight_ent = ent_coef
         self._grad_norm = max_grad_norm
         self._batch = max_batchsize
+        self._actor_critic = ActorCritic(self.actor, self.critic)
 
     def process_fn(
         self, batch: Batch, buffer: ReplayBuffer, indices: np.ndarray
@@ -83,9 +85,9 @@ class A2CPolicy(PGPolicy):
     ) -> Batch:
         v_s, v_s_ = [], []
         with torch.no_grad():
-            for b in batch.split(self._batch, shuffle=False, merge_last=True):
-                v_s.append(self.critic(b.obs))
-                v_s_.append(self.critic(b.obs_next))
+            for minibatch in batch.split(self._batch, shuffle=False, merge_last=True):
+                v_s.append(self.critic(minibatch.obs))
+                v_s_.append(self.critic(minibatch.obs_next))
         batch.v_s = torch.cat(v_s, dim=0).flatten()  # old value
         v_s = batch.v_s.cpu().numpy()
         v_s_ = torch.cat(v_s_, dim=0).flatten().cpu().numpy()
@@ -120,14 +122,15 @@ class A2CPolicy(PGPolicy):
     ) -> Dict[str, List[float]]:
         losses, actor_losses, vf_losses, ent_losses = [], [], [], []
         for _ in range(repeat):
-            for b in batch.split(batch_size, merge_last=True):
+            for minibatch in batch.split(batch_size, merge_last=True):
                 # calculate loss for actor
-                dist = self(b).dist
-                log_prob = dist.log_prob(b.act).reshape(len(b.adv), -1).transpose(0, 1)
-                actor_loss = -(log_prob * b.adv).mean()
+                dist = self(minibatch).dist
+                log_prob = dist.log_prob(minibatch.act)
+                log_prob = log_prob.reshape(len(minibatch.adv), -1).transpose(0, 1)
+                actor_loss = -(log_prob * minibatch.adv).mean()
                 # calculate loss for critic
-                value = self.critic(b.obs).flatten()
-                vf_loss = F.mse_loss(b.returns, value)
+                value = self.critic(minibatch.obs).flatten()
+                vf_loss = F.mse_loss(minibatch.returns, value)
                 # calculate regularization and overall loss
                 ent_loss = dist.entropy().mean()
                 loss = actor_loss + self._weight_vf * vf_loss \
@@ -136,8 +139,7 @@ class A2CPolicy(PGPolicy):
                 loss.backward()
                 if self._grad_norm:  # clip large gradient
                     nn.utils.clip_grad_norm_(
-                        set(self.actor.parameters()).union(self.critic.parameters()),
-                        max_norm=self._grad_norm
+                        self._actor_critic.parameters(), max_norm=self._grad_norm
                     )
                 self.optim.step()
                 actor_losses.append(actor_loss.item())

@@ -87,9 +87,14 @@ class MLP(nn.Module):
         self.output_dim = output_dim or hidden_sizes[-1]
         self.model = nn.Sequential(*model)
 
-    def forward(self, x: Union[np.ndarray, torch.Tensor]) -> torch.Tensor:
-        x = torch.as_tensor(x, device=self.device, dtype=torch.float32)  # type: ignore
-        return self.model(x.flatten(1))
+    def forward(self, obs: Union[np.ndarray, torch.Tensor]) -> torch.Tensor:
+        if self.device is not None:
+            obs = torch.as_tensor(
+                obs,
+                device=self.device,  # type: ignore
+                dtype=torch.float32,
+            )
+        return self.model(obs.flatten(1))  # type: ignore
 
 
 class Net(nn.Module):
@@ -182,12 +187,12 @@ class Net(nn.Module):
 
     def forward(
         self,
-        s: Union[np.ndarray, torch.Tensor],
+        obs: Union[np.ndarray, torch.Tensor],
         state: Any = None,
         info: Dict[str, Any] = {},
     ) -> Tuple[torch.Tensor, Any]:
-        """Mapping: s -> flatten (inside MLP)-> logits."""
-        logits = self.model(s)
+        """Mapping: obs -> flatten (inside MLP)-> logits."""
+        logits = self.model(obs)
         bsz = logits.shape[0]
         if self.use_dueling:  # Dueling DQN
             q, v = self.Q(logits), self.V(logits)
@@ -230,35 +235,79 @@ class Recurrent(nn.Module):
 
     def forward(
         self,
-        s: Union[np.ndarray, torch.Tensor],
+        obs: Union[np.ndarray, torch.Tensor],
         state: Optional[Dict[str, torch.Tensor]] = None,
         info: Dict[str, Any] = {},
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        """Mapping: s -> flatten -> logits.
+        """Mapping: obs -> flatten -> logits.
 
-        In the evaluation mode, s should be with shape ``[bsz, dim]``; in the
-        training mode, s should be with shape ``[bsz, len, dim]``. See the code
+        In the evaluation mode, `obs` should be with shape ``[bsz, dim]``; in the
+        training mode, `obs` should be with shape ``[bsz, len, dim]``. See the code
         and comment for more detail.
         """
-        s = torch.as_tensor(s, device=self.device, dtype=torch.float32)  # type: ignore
-        # s [bsz, len, dim] (training) or [bsz, dim] (evaluation)
+        obs = torch.as_tensor(
+            obs,
+            device=self.device,  # type: ignore
+            dtype=torch.float32,
+        )
+        # obs [bsz, len, dim] (training) or [bsz, dim] (evaluation)
         # In short, the tensor's shape in training phase is longer than which
         # in evaluation phase.
-        if len(s.shape) == 2:
-            s = s.unsqueeze(-2)
-        s = self.fc1(s)
+        if len(obs.shape) == 2:
+            obs = obs.unsqueeze(-2)
+        obs = self.fc1(obs)
         self.nn.flatten_parameters()
         if state is None:
-            s, (h, c) = self.nn(s)
+            obs, (hidden, cell) = self.nn(obs)
         else:
             # we store the stack data in [bsz, len, ...] format
             # but pytorch rnn needs [len, bsz, ...]
-            s, (h, c) = self.nn(
-                s, (
-                    state["h"].transpose(0, 1).contiguous(),
-                    state["c"].transpose(0, 1).contiguous()
+            obs, (hidden, cell) = self.nn(
+                obs, (
+                    state["hidden"].transpose(0, 1).contiguous(),
+                    state["cell"].transpose(0, 1).contiguous()
                 )
             )
-        s = self.fc2(s[:, -1])
+        obs = self.fc2(obs[:, -1])
         # please ensure the first dim is batch size: [bsz, len, ...]
-        return s, {"h": h.transpose(0, 1).detach(), "c": c.transpose(0, 1).detach()}
+        return obs, {
+            "hidden": hidden.transpose(0, 1).detach(),
+            "cell": cell.transpose(0, 1).detach()
+        }
+
+
+class ActorCritic(nn.Module):
+    """An actor-critic network for parsing parameters.
+
+    Using ``actor_critic.parameters()`` instead of set.union or list+list to avoid
+    issue #449.
+
+    :param nn.Module actor: the actor network.
+    :param nn.Module critic: the critic network.
+    """
+
+    def __init__(self, actor: nn.Module, critic: nn.Module) -> None:
+        super().__init__()
+        self.actor = actor
+        self.critic = critic
+
+
+class DataParallelNet(nn.Module):
+    """DataParallel wrapper for training agent with multi-GPU.
+
+    This class does only the conversion of input data type, from numpy array to torch's
+    Tensor. If the input is a nested dictionary, the user should create a similar class
+    to do the same thing.
+
+    :param nn.Module net: the network to be distributed in different GPUs.
+    """
+
+    def __init__(self, net: nn.Module) -> None:
+        super().__init__()
+        self.net = nn.DataParallel(net)
+
+    def forward(self, obs: Union[np.ndarray, torch.Tensor], *args: Any,
+                **kwargs: Any) -> Tuple[Any, Any]:
+        if not isinstance(obs, torch.Tensor):
+            obs = torch.as_tensor(obs, dtype=torch.float32)
+        return self.net(obs=obs.cuda(), *args, **kwargs)
